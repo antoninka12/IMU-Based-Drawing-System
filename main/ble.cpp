@@ -95,12 +95,20 @@ static int gatt_service_initialization(void){
     return 0;
 }
 
-/* Wzoruj się na:
-gatt_svc.c → funkcja:
 
-void gatt_svr_subscribe_cb(struct ble_gap_event *event)*/
+/*checking if receiver enabled data reception*/
 static void gatt_svr_subscribe_cb(struct ble_gap_event *event){
-    
+    if(event->subscribe.attr_handle ==imu_val_handle){
+        imu_conn_handle=event->subscribe.conn_handle;
+        imu_notify_enabled=event->subscribe.cur_notify;
+
+        if(!imu_notify_enabled){
+            ESP_LOGE(TAG, "IMU devices notifications are disabled");
+        }
+        else{
+                  ESP_LOGE(TAG, "IMU devices notifications are enabled");
+        }
+   }
 }
 
 /*Uruchamia reklamowanie BLE, czyli sprawia, że urządzenie jest widoczne jako Drawing_Device.
@@ -109,18 +117,130 @@ Wzoruj się na:
 gap.c → funkcja:
 
 static void start_advertising(void)*/
-static void start_advertising(void)
+
+/*BLE advertasing*/
+static void start_advertising(void){
+    int support_variable;
+
+    const char *dev_name=ble_svc_gap_device_name();
+
+    struct ble_hs_adv_fields az_adv_fields = {0};
+    az_adv_fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    az_adv_fields.name = (uint8_t *)dev_name;
+    az_adv_fields.name_len = strlen(dev_name);
+    az_adv_fields.name_is_complete = 1;
+
+    support_variable=ble_gap_adv_set_fields(&adv_fields);
+
+    if(support_variable!=0){
+        ESP_LOGE(TAG, "Failed to advertise, error: %d", support_variable);
+        return;
+    }
+
+    struct ble_gap_adv_params adv_params = {0};
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(500);
+    adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(510);
+
+    support_variable = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+                           &adv_params, gap_event_handler, NULL);
+
+    if(support_variable!=0){
+        ESP_LOGE(TAG, "Failed to advertise, error: %d", support_variable);
+        return;
+    }
+
+    ESP_LOGE(TAG, "Advertising");
+}
 
 /*Wzoruj się na:
 gap.c → funkcja:
 
 static int gap_event_handler(struct ble_gap_event *event, void *arg)*/
+
+
+/*main.c z przykładu → funkcja typu: */
+
 static int gap_event_handler(struct ble_gap_event *event, void *arg)
+{
+    int rc = 0;
 
-/*main.c z przykładu → funkcja typu:
+    switch (event->type) {
 
-static void on_stack_sync(void), static void bleprph_on_sync(void)*/
-static void on_stack_sync(void)
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            imu_connected = true;
+            imu_conn_handle = event->connect.conn_handle;
+
+            ESP_LOGI(TAG,
+                     "BLE connected; conn_handle=%d",
+                     imu_conn_handle);
+        } else {
+            imu_connected = false;
+            imu_notify_enabled = false;
+            imu_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+
+            ESP_LOGE(TAG,
+                     "BLE connection failed; status=%d",
+                     event->connect.status);
+
+            start_advertising();
+        }
+        return rc;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG,
+                 "BLE disconnected; reason=%d",
+                 event->disconnect.reason);
+
+        imu_connected = false;
+        imu_notify_enabled = false;
+        imu_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+
+        start_advertising();
+        return rc;
+
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ESP_LOGI(TAG,
+                 "Subscribe event; conn_handle=%d attr_handle=%d cur_notify=%d",
+                 event->subscribe.conn_handle,
+                 event->subscribe.attr_handle,
+                 event->subscribe.cur_notify);
+
+        gatt_svr_subscribe_cb(event);
+        return rc;
+
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        if (event->notify_tx.status != 0 &&
+            event->notify_tx.status != BLE_HS_EDONE) {
+            ESP_LOGW(TAG,
+                     "Notify error; conn_handle=%d attr_handle=%d status=%d",
+                     event->notify_tx.conn_handle,
+                     event->notify_tx.attr_handle,
+                     event->notify_tx.status);
+        }
+        return rc;
+
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGI(TAG,
+                 "MTU updated; conn_handle=%d mtu=%d",
+                 event->mtu.conn_handle,
+                 event->mtu.value);
+        return rc;
+
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        ESP_LOGI(TAG,
+                 "Advertising complete; reason=%d",
+                 event->adv_complete.reason);
+
+        start_advertising();
+        return rc;
+
+    default:
+        return rc;
+    }
+}
 
 /*Wzoruj się na:
 main.c z przykładu → funkcja:
