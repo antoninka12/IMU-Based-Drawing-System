@@ -1,4 +1,4 @@
-#include "ble.h"
+#include "ble.hpp"
 #include "esp_log.h" /*esp-idf logs*/
 
 /*includes for BLE*/
@@ -46,6 +46,15 @@ static bool imu_connected=false;
 /*flag for notifications*/
 static bool imu_notify_enabled=false;
 
+static uint8_t own_addr_type;
+
+static int gap_event_handler(struct ble_gap_event *event, void *arg);
+
+static int imu_data_access_cb(uint16_t conn_handle,
+                              uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt,
+                              void *arg);
+
 /*create BLE service with set UUID and primary type
 with characteristic (with set UUID, flags for notify) and 
 save to handle*/
@@ -56,7 +65,7 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
         .characteristics=(struct ble_gatt_chr_def[]){
             {
             .uuid=&IMU_DATA_UUID.u,
-            .access_cb=NULL,
+            .access_cb=imu_data_access_cb,
             .flags=BLE_GATT_CHR_F_NOTIFY,
             .val_handle=&imu_val_handle,
             },{
@@ -67,6 +76,15 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {0}
 
     };
+
+
+    static int imu_data_access_cb(uint16_t conn_handle,
+                              uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt,
+                              void *arg)
+{
+    return 0;
+}
 
     /*Wzoruj się na:
 gatt_svc.c → funkcja int gatt_svc_init(void)*/
@@ -130,7 +148,7 @@ static void start_advertising(void){
     az_adv_fields.name_len = strlen(dev_name);
     az_adv_fields.name_is_complete = 1;
 
-    support_variable=ble_gap_adv_set_fields(&adv_fields);
+    support_variable=ble_gap_adv_set_fields(&az_adv_fields);
 
     if(support_variable!=0){
         ESP_LOGE(TAG, "Failed to advertise, error: %d", support_variable);
@@ -143,8 +161,14 @@ static void start_advertising(void){
     adv_params.itvl_min = BLE_GAP_ADV_ITVL_MS(500);
     adv_params.itvl_max = BLE_GAP_ADV_ITVL_MS(510);
 
-    support_variable = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
-                           &adv_params, gap_event_handler, NULL);
+    support_variable = ble_gap_adv_start(
+    own_addr_type,
+    NULL,
+    BLE_HS_FOREVER,
+    &adv_params,
+    gap_event_handler,
+    NULL
+);
 
     if(support_variable!=0){
         ESP_LOGE(TAG, "Failed to advertise, error: %d", support_variable);
@@ -251,6 +275,16 @@ albo:
 
 void bleprph_host_task(void *param)*/
 static void ble_host_task(void *param)
+{
+    ESP_LOGI(TAG, "BLE host task started");
+
+   
+    nimble_port_run();
+
+    nimble_port_freertos_deinit();
+
+    ESP_LOGI(TAG, "BLE host task stopped");
+}
 
 /*Wzoruj się na:
 main.c z przykładu → app_main(), dokładnie na kolejności:
@@ -262,6 +296,54 @@ ble_svc_gap_device_name_set(...);
 gatt_svc_init();
 nimble_port_freertos_init(...);*/
 void ble_initialization(void)
+{
+    int support_variable;
+
+    
+    support_variable = nvs_flash_init();
+    if (support_variable != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize NVS, error code: %d", support_variable);
+        return;
+    }
+
+   
+    support_variable = nimble_port_init();
+    if (support_variable != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize NimBLE port, error code: %d", support_variable);
+        return;
+    }
+
+   
+    ble_svc_gap_init();
+
+    support_variable = ble_svc_gap_device_name_set(DEVICE_NAME);
+    if (support_variable != 0) {
+        ESP_LOGE(TAG, "Failed to set BLE device name, error code: %d", support_variable);
+        return;
+    }
+
+    support_variable = gatt_service_initialization();
+    if (support_variable != 0) {
+        ESP_LOGE(TAG, "Failed to initialize GATT service, error code: %d", support_variable);
+        return;
+    }
+
+    ble_hs_cfg.sync_cb = []() {
+        int rc;
+
+        rc = ble_hs_id_infer_auto(0, &own_addr_type);
+        if (rc != 0) {
+            ESP_LOGE(TAG, "Failed to infer BLE address type, error code: %d", rc);
+            return;
+        }
+
+        start_advertising();
+    };
+
+    nimble_port_freertos_init(ble_host_task);
+
+    ESP_LOGI(TAG, "BLE initialization finished");
+}
 
 /*Wzoruj się częściowo na:
 gatt_svc.c → funkcja:
@@ -272,6 +354,45 @@ ale zamiast:
 
 ble_gatts_indicate(...)*/
 void ble_sending_data(const char *data)
+{
+    if (data == NULL) {
+        ESP_LOGE(TAG, "Data pointer is NULL");
+        return;
+    }
+
+    if (!imu_connected) {
+        ESP_LOGW(TAG, "Cannot send data: BLE client is not connected");
+        return;
+    }
+
+    if (!imu_notify_enabled) {
+        ESP_LOGW(TAG, "Cannot send data: notifications are not enabled");
+        return;
+    }
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, strlen(data));
+
+    if (om == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate BLE mbuf");
+        return;
+    }
+
+    int rc = ble_gatts_notify_custom(
+        imu_conn_handle,
+        imu_val_handle,
+        om
+    );
+
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to send notification, error code: %d", rc);
+        return;
+    }
+
+    ESP_LOGI(TAG, "BLE data sent: %s", data);
+}
 
 
 bool ble_is_connected(void)
+{
+    return imu_connected;
+}
