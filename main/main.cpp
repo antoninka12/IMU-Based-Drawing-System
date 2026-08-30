@@ -1,47 +1,145 @@
-#include "ble.hpp"
+#include "i2c.hpp"
+#include "bmi160.hpp"
+#include "config.hpp"
 
 #include "esp_log.h"
+#include "esp_err.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include <stdio.h>
 
-#define TAG "MAIN_TEST"
+static const char* TAG = "APP";
+
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting BLE test application");
+    // =========================================================
+    // 1. Inicjalizacja magistrali I2C
+    // =========================================================
 
-    ble_initialization();
+    static AZ_i2c::Bus bus;
 
-    int sequence_number = 0;
+    esp_err_t err = bus.init(
+        AZ_config::I2C_PORT,
+        AZ_config::I2C_SDA,
+        AZ_config::I2C_SCL,
+        AZ_config::I2C_INTERNAL_PULLUP
+    );
 
-    while (true) {
-        char data[64];
-
-        unsigned long timestamp_ms =
-            (unsigned long)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-
-        snprintf(
-            data,
-            sizeof(data),
-            "%d,%lu,%d,%d,%d",
-            sequence_number,
-            timestamp_ms,
-            100,
-            200,
-            300
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "I2C init failed: %s",
+            esp_err_to_name(err)
         );
 
-        if (ble_is_connected()) {
-            ble_sending_data(data);
-        } else {
-            ESP_LOGI(TAG, "Waiting for BLE client connection...");
+        return;
+    }
+
+    ESP_LOGI(TAG, "I2C initialized");
+
+
+    // =========================================================
+    // 2. Skan magistrali
+    // =========================================================
+
+    ESP_LOGI(TAG, "Scanning I2C bus...");
+
+    bus.scan();
+
+
+    // =========================================================
+    // 3. Sprawdzenie adresu BMI160
+    // =========================================================
+
+    err = bus.probe(AZ_config::IMU_ADDR);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "BMI160 not found at address 0x%02X",
+            AZ_config::IMU_ADDR
+        );
+
+        return;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Device found at address 0x%02X",
+        AZ_config::IMU_ADDR
+    );
+
+
+    // =========================================================
+    // 4. Inicjalizacja BMI160
+    // =========================================================
+
+    static AZ_bmi160::Bmi160 imu;
+
+    err = imu.init(
+        bus,
+        AZ_config::IMU_ADDR
+    );
+
+    if (err != ESP_OK) {
+        ESP_LOGE(
+            TAG,
+            "BMI160 init failed: %s",
+            esp_err_to_name(err)
+        );
+
+        return;
+    }
+
+    ESP_LOGI(TAG, "BMI160 initialized successfully");
+
+
+    // =========================================================
+    // 5. Odczyt danych
+    // =========================================================
+
+    while (true)
+    {
+        AZ_bmi160::RawSample sample{};
+
+        err = imu.readRaw(sample);
+
+        if (err == ESP_OK)
+        {
+            ESP_LOGI(
+                TAG,
+                "ACC [raw]: X=%d Y=%d Z=%d | "
+                "GYR [raw]: X=%d Y=%d Z=%d",
+                static_cast<int>(sample.ax),
+                static_cast<int>(sample.ay),
+                static_cast<int>(sample.az),
+                static_cast<int>(sample.gx),
+                static_cast<int>(sample.gy),
+                static_cast<int>(sample.gz)
+            );
+
+            // =============================================
+            // Tutaj później wysyłasz sample przez BLE
+            //
+            // np.
+            //
+            // ble.send(...);
+            //
+            // =============================================
+        }
+        else
+        {
+            ESP_LOGE(
+                TAG,
+                "BMI160 read failed: %s",
+                esp_err_to_name(err)
+            );
         }
 
-        sequence_number++;
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        // Na test 10 Hz, żeby logi były czytelne.
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
