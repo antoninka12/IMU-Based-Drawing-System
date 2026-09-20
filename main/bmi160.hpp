@@ -16,11 +16,23 @@ struct RawSample {
     int16_t az;
 };
 
+struct CalibratedSample {
+    float gx;
+    float gy;
+    float gz;
+
+    float ax;
+    float ay;
+    float az;
+};
+
 class Bmi160 {
 public:
     esp_err_t init(const AZ_i2c::Bus& bus, uint8_t addr = 0x68);
 
     esp_err_t readRaw(RawSample& sample) const;
+
+    esp_err_t readCalibrated(CalibratedSample& sample) const;
 
 private:
     AZ_i2c::Device dev_;
